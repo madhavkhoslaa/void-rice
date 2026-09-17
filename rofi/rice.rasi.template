@@ -1,0 +1,27 @@
+* {
+    background: @BACKGROUND@;
+    foreground: @FOREGROUND@;
+    accent: @COLOR4@;
+    muted: @COLOR8@;
+    background-color: @background;
+    text-color: @foreground;
+    border-color: @accent;
+    spacing: 8px;
+}
+window {
+    width: 520px;
+    border: 2px;
+    border-radius: 0px;
+    padding: 18px;
+}
+mainbox { children: [ inputbar, listview ]; }
+inputbar { children: [ prompt, entry ]; padding: 8px; }
+prompt { text-color: @accent; }
+entry { placeholder: "Search"; placeholder-color: @muted; }
+listview { lines: 7; columns: 1; scrollbar: false; fixed-height: true; }
+element { padding: 10px; border-radius: 0px; }
+element selected.normal {
+    background-color: @accent;
+    text-color: @background;
+}
+element-text { background-color: inherit; text-color: inherit; }

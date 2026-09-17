@@ -1,0 +1,12 @@
+#!/bin/sh
+export LC_ALL=C
+volume=$(timeout 2 wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null) || {
+    printf 'n/a\n'; exit 0
+}
+printf '%s\n' "$volume" | awk '
+    /^Volume: [0-9]/ {
+        printf "%.0f%%%s\n", $2 * 100, /\[MUTED\]/ ? " muted" : ""
+        found = 1
+    }
+    END { if (!found) print "n/a" }
+'

@@ -1,0 +1,122 @@
+/* Rendered by rice-theme into config.h. Edit this template, then rice-rebuild. */
+#include <X11/XF86keysym.h>
+#define SHCMD(cmd) { .v = (const char*[]){ "/bin/sh", "-c", cmd, NULL } }
+#define MODKEY Mod4Mask
+#define TAGKEYS(KEY,TAG) \
+    { MODKEY, KEY, view, {.ui = 1 << TAG} }, \
+    { MODKEY|ControlMask, KEY, toggleview, {.ui = 1 << TAG} }, \
+    { MODKEY|ShiftMask, KEY, tag, {.ui = 1 << TAG} }, \
+    { MODKEY|ControlMask|ShiftMask, KEY, toggletag, {.ui = 1 << TAG} },
+
+#if ROUNDED_CORNERS_PATCH
+static const unsigned int borderpx = 0;
+static const int corner_radius = 10;
+#else
+static const unsigned int borderpx = 2;
+#endif
+static const unsigned int snap = 24;
+static const unsigned int gappih = 8, gappiv = 8, gappoh = 10, gappov = 10;
+static const int smartgaps_fact = 1;
+static const int showbar = 1, topbar = 1;
+static const int bar_height = 28;
+static const int vertpad = 0, sidepad = 0;
+static const char statussep = ';';
+static const unsigned int systrayspacing = 4;
+/* Compiled in, hidden by default to keep exactly six information fields. */
+static const int showsystray = 0;
+static const char *fonts[] = { "DejaVu Sans Mono:size=9", "Symbols Nerd Font Mono:size=10" };
+static int tiledindicatortype = INDICATOR_NONE;
+static int floatindicatortype = INDICATOR_NONE;
+
+/* The generated config.h contains literal pywal hex values here. */
+static char bg[] = "@BARBACKGROUND@";
+static char fg[] = "@FOREGROUND@";
+static char dim[] = "@BARMUTED@";
+static char accent[] = "@COLOR4@";
+static char urgent[] = "@COLOR1@";
+static char *colors[][ColCount] = {
+    [SchemeNorm]      = { fg, bg, dim, dim },
+    [SchemeSel]       = { bg, accent, accent, accent },
+    [SchemeTitleNorm] = { fg, bg, dim, dim },
+    [SchemeTitleSel]  = { fg, bg, accent, accent },
+    [SchemeTagsNorm]  = { fg, bg, dim, dim },
+    [SchemeTagsSel]   = { accent, bg, accent, accent },
+    [SchemeHidNorm]   = { dim, bg, dim, dim },
+    [SchemeHidSel]    = { fg, bg, accent, accent },
+    [SchemeUrg]       = { fg, bg, urgent, urgent },
+};
+
+static char *tagicons[][NUMTAGS] = {
+    [DEFAULT_TAGS] = { "1", "2", "3", "4", "5", "6", "7", "8", "9" },
+};
+static const Rule rules[] = {
+    RULE(.wintype = WTYPE "DIALOG", .isfloating = 1)
+    RULE(.wintype = WTYPE "UTILITY", .isfloating = 1)
+    RULE(.wintype = WTYPE "SPLASH", .isfloating = 1)
+};
+
+#include "bar-current.h"
+static const BarRule barrules[] = {
+    /* monitor bar alignment      width          draw          click hover name */
+    /* Reserve center FIRST so the clock is screen-centered, not centered
+     * in whatever space the left/right modules happen to leave behind. */
+    { -1, 0, BAR_ALIGN_CENTER, width_status_es, draw_status_es, NULL, NULL, "clock" },
+    { -1, 0, BAR_ALIGN_LEFT, width_current, draw_current, NULL, NULL, "current" },
+    { 0, 0, BAR_ALIGN_RIGHT_RIGHT, width_systray, draw_systray, click_systray, NULL, "systray" },
+    { -1, 0, BAR_ALIGN_RIGHT_RIGHT, width_status, draw_status, click_status, NULL, "status" },
+};
+
+static const float mfact = 0.56;
+static const int nmaster = 1;
+static const int resizehints = 0, lockfullscreen = 1;
+/* Mouse-move event throttle, not animation or an idle render loop. */
+static const int refreshrate = 60;
+static const Layout layouts[] = {
+    { "[]=", tile }, { "><>", NULL }, { "[M]", monocle },
+};
+static const char *termcmd[] = { "xterm", NULL };
+static const char *roficmd[] = { "rofi", "-show", "drun", NULL };
+static const Key keys[] = {
+    { MODKEY, XK_Return, spawn, {.v = termcmd} },
+    { MODKEY, XK_p, spawn, {.v = roficmd} },
+    { MODKEY, XK_b, togglebar, {0} },
+    { MODKEY, XK_j, focusstack, {.i = +1} },
+    { MODKEY, XK_k, focusstack, {.i = -1} },
+    { MODKEY, XK_h, setmfact, {.f = -0.05} },
+    { MODKEY, XK_l, setmfact, {.f = +0.05} },
+    { MODKEY, XK_i, incnmaster, {.i = +1} },
+    { MODKEY, XK_d, incnmaster, {.i = -1} },
+    { MODKEY|ShiftMask, XK_Return, zoom, {0} },
+    { MODKEY, XK_Tab, view, {0} },
+    { MODKEY|ShiftMask, XK_c, killclient, {0} },
+    { MODKEY, XK_t, setlayout, {.v = &layouts[0]} },
+    { MODKEY, XK_f, setlayout, {.v = &layouts[1]} },
+    { MODKEY, XK_m, setlayout, {.v = &layouts[2]} },
+    { MODKEY|ShiftMask, XK_space, togglefloating, {0} },
+    { MODKEY, XK_g, togglegaps, {0} },
+    { MODKEY, XK_minus, incrgaps, {.i = -2} },
+    { MODKEY, XK_equal, incrgaps, {.i = +2} },
+    { MODKEY|ShiftMask, XK_g, defaultgaps, {0} },
+    { MODKEY, XK_comma, focusmon, {.i = -1} },
+    { MODKEY, XK_period, focusmon, {.i = +1} },
+    { MODKEY|ShiftMask, XK_comma, tagmon, {.i = -1} },
+    { MODKEY|ShiftMask, XK_period, tagmon, {.i = +1} },
+    { MODKEY, XK_F9, spawn, SHCMD("rice-picom toggle") },
+    { MODKEY, XK_F10, spawn, SHCMD("rice-picom effects") },
+    { 0, XF86XK_MonBrightnessUp, spawn, SHCMD("rice-controls brightness-up") },
+    { 0, XF86XK_MonBrightnessDown, spawn, SHCMD("rice-controls brightness-down") },
+    { 0, XF86XK_AudioRaiseVolume, spawn, SHCMD("rice-controls volume-up") },
+    { 0, XF86XK_AudioLowerVolume, spawn, SHCMD("rice-controls volume-down") },
+    { 0, XF86XK_AudioMute, spawn, SHCMD("rice-controls mute") },
+    { MODKEY|ShiftMask, XK_w, spawn, SHCMD("rice-wallpaper-menu") },
+    { MODKEY|ShiftMask, XK_r, quit, {.i = 1} },
+    { MODKEY|ShiftMask, XK_q, quit, {.i = 0} },
+    TAGKEYS(XK_1, 0) TAGKEYS(XK_2, 1) TAGKEYS(XK_3, 2)
+    TAGKEYS(XK_4, 3) TAGKEYS(XK_5, 4) TAGKEYS(XK_6, 5)
+    TAGKEYS(XK_7, 6) TAGKEYS(XK_8, 7) TAGKEYS(XK_9, 8)
+};
+static const Button buttons[] = {
+    { ClkClientWin, MODKEY, Button1, movemouse, {0} },
+    { ClkClientWin, MODKEY, Button2, togglefloating, {0} },
+    { ClkClientWin, MODKEY, Button3, resizemouse, {0} },
+};

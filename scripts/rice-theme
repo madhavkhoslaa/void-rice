@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""pywal -> literal config.h + rofi/dunst/XTerm -> build -> atomic WM swap."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import tempfile
+
+HOME = Path.home()
+CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache"))
+CONFIG = CONFIG_HOME / "rice"
+CACHE = CACHE_HOME / "rice"
+DATA = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "rice"
+SOURCE = HOME / ".local/src/rice/dwm"
+BIN = HOME / ".local/bin"
+
+
+def atomic_write(path, data, mode=0o644):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".rice-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        os.chmod(name, mode)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def render(path, palette):
+    tokens = {"BACKGROUND": palette["special"]["background"],
+              "FOREGROUND": palette["special"]["foreground"]}
+    tokens.update({f"COLOR{i}": palette["colors"][f"color{i}"] for i in range(16)})
+    if any(not re.fullmatch(r"#[0-9a-fA-F]{6}", value) for value in tokens.values()):
+        raise ValueError("pywal returned an invalid color")
+    # The reference has a nearly black bar. Derive its tint from the same
+    # wallpaper palette, keeping the main rofi/dunst surfaces a little lighter.
+    background = [int(tokens["BACKGROUND"][i:i+2], 16) for i in (1, 3, 5)]
+    foreground = [int(tokens["FOREGROUND"][i:i+2], 16) for i in (1, 3, 5)]
+    bar = [round(value * 0.45) for value in background]
+    tokens["BARBACKGROUND"] = "#" + "".join(f"{value:02x}" for value in bar)
+    tokens["BARMUTED"] = "#" + "".join(f"{round(b + (f-b)*0.32):02x}" for b, f in zip(bar, foreground))
+    text = path.read_text()
+    for key, value in tokens.items():
+        text = text.replace(f"@{key}@", value)
+    if re.search(r"@[A-Z][A-Z0-9_]*@", text):
+        raise ValueError(f"Unresolved palette token in {path}")
+    return text.encode()
+
+
+def apply(args):
+    if not (SOURCE / "dwm.c").is_file():
+        raise RuntimeError("dwm sources missing: run install.sh first")
+    CACHE.mkdir(parents=True, exist_ok=True)
+    DATA.mkdir(parents=True, exist_ok=True)
+    with (CACHE / "theme.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with tempfile.TemporaryDirectory(prefix="theme-", dir=CACHE) as temp:
+            stage = Path(temp)
+            wallpaper = None
+            if args.rebuild:
+                palette = json.loads((CACHE_HOME / "wal/colors.json").read_text())
+            else:
+                original = Path(args.wallpaper).expanduser().resolve(strict=True)
+                if not original.is_file():
+                    raise ValueError("Wallpaper must be a file")
+                wallpaper = stage / ("wallpaper" + original.suffix)
+                shutil.copyfile(original, wallpaper)
+                env = dict(os.environ, XDG_CACHE_HOME=str(stage / "cache"))
+                # Headless generation: no wallpaper setting, escape sequences,
+                # TTY writes, xrdb updates or automatic application reloads.
+                subprocess.run(["wal", "-i", str(wallpaper), "-n", "-s", "-t", "-e", "-q"],
+                               env=env, check=True)
+                palette = json.loads((stage / "cache/wal/colors.json").read_text())
+                palette["wallpaper"] = str(DATA / "wallpaper")
+
+            outputs = {
+                CONFIG / "dwm/config.h": render(CONFIG / "dwm/config.h.template", palette),
+                CONFIG_HOME / "rofi/rice.rasi": render(CONFIG / "rofi/rice.rasi.template", palette),
+                CONFIG_HOME / "dunst/dunstrc": render(CONFIG / "dunst/dunstrc.template", palette),
+                CONFIG / "x11/Xresources": render(CONFIG / "x11/Xresources.template", palette),
+            }
+            build = stage / "build"
+            shutil.copytree(SOURCE, build, ignore=shutil.ignore_patterns(
+                ".git", ".prowl", "*.o", "dwm", "*.tar.gz"))
+            (build / "config.h").write_bytes(outputs[CONFIG / "dwm/config.h"])
+            for name in ("config.mk", "patches.h", "bar-current.h"):
+                shutil.copyfile(CONFIG / "dwm" / name, build / name)
+            jobs = os.environ.get("RICE_JOBS", "2")
+            if not jobs.isdigit() or int(jobs) < 1:
+                raise ValueError("RICE_JOBS must be a positive integer")
+            subprocess.run(["make", "-j" + jobs], cwd=build, check=True)
+            # Suckless dwm deliberately implements -v via die(), exit status 1.
+            version = subprocess.run([str(build / "dwm"), "-v"], capture_output=True, text=True)
+            if version.returncode != 1 or "dwm-6.8-rice" not in version.stderr:
+                raise RuntimeError("Built dwm failed its version check")
+
+            # Publish only after a successful compile. An invalid template never
+            # changes the running WM, current wallpaper, or active theme files.
+            for path, content in outputs.items():
+                atomic_write(path, content)
+            for name in ("config.h", "config.mk", "patches.h", "bar-current.h"):
+                atomic_write(SOURCE / name, (build / name).read_bytes())
+            atomic_write(BIN / "rice-dwm", (build / "dwm").read_bytes(), 0o755)
+            if wallpaper:
+                atomic_write(DATA / "wallpaper", wallpaper.read_bytes())
+            atomic_write(CACHE_HOME / "wal/colors.json", (json.dumps(palette, indent=2) + "\n").encode())
+
+    if os.environ.get("DISPLAY") and not args.no_reload:
+        subprocess.run(["xrdb", "-merge", str(CONFIG / "x11/Xresources")], check=True)
+        if wallpaper:
+            subprocess.run(["feh", "--no-fehbg", "--bg-fill", str(DATA / "wallpaper")], check=True)
+        subprocess.run(["dunstctl", "reload"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+        display = re.sub(r"[^a-zA-Z0-9_-]", "_", os.environ["DISPLAY"])
+        runtime = Path(os.environ.get("XDG_RUNTIME_DIR", CACHE / "runtime")) / ("rice-" + display)
+        pidfile = runtime / "dwm.pid"
+        if pidfile.exists():
+            try:
+                pid = int(pidfile.read_text().strip())
+                exe = os.readlink(f"/proc/{pid}/exe").removesuffix(" (deleted)")
+                if exe == str(BIN / "rice-dwm"):
+                    os.kill(pid, signal.SIGHUP)
+            except (ValueError, ProcessLookupError, FileNotFoundError):
+                pass
+    print("Palette applied; dwm built successfully.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("wallpaper", nargs="?")
+    parser.add_argument("--rebuild", action="store_true", help="reuse the saved pywal palette")
+    parser.add_argument("--no-reload", action="store_true", help="build/install without touching a live X session")
+    options = parser.parse_args()
+    if bool(options.wallpaper) == options.rebuild:
+        parser.error("supply a wallpaper OR --rebuild")
+    try:
+        apply(options)
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError) as error:
+        parser.exit(1, f"rice-theme: {error}\n")

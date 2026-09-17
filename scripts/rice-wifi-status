@@ -1,0 +1,47 @@
+#!/bin/sh
+set -u
+export LC_ALL=C
+. "$HOME/.local/bin/rice-lib.sh"
+poll_wifi() {
+    iface=$(cat "$RICE_CONFIG/wifi-interface" 2>/dev/null || :)
+    if [ -z "$iface" ] || [ ! -d "/sys/class/net/$iface/wireless" ]; then
+        printf 'absent\n'; return
+    fi
+    # Permission comes from GROUP=ricewifi; no sudo in the bar.
+    status=$(timeout 2 wpa_cli -p /run/wpa_supplicant -i "$iface" status 2>/dev/null) || {
+        printf 'control?\n'; return
+    }
+    state=$(printf '%s\n' "$status" | sed -n 's/^wpa_state=//p')
+    case "$state" in
+        COMPLETED) ;;
+        SCANNING|ASSOCIATING|ASSOCIATED|AUTHENTICATING|4WAY_HANDSHAKE|GROUP_HANDSHAKE)
+            printf 'connecting\n'; return ;;
+        DISCONNECTED|INACTIVE|INTERFACE_DISABLED)
+            printf 'disconnected\n'; return ;;
+        *) printf 'control?\n'; return ;;
+    esac
+    # Keep wpa_cli escapes literal, sanitize separators (including the clock's
+    # semicolon), and truncate the display label to keep the right cluster slim.
+    ssid=$(printf '%s\n' "$status" | sed -n 's/^ssid=//p' | tr -d '\000-\037\177' | tr '|;' '//' | cut -c1-20)
+    rssi=$(timeout 2 wpa_cli -p /run/wpa_supplicant -i "$iface" signal_poll 2>/dev/null |
+        sed -n 's/^RSSI=//p')
+    case "$rssi" in -[0-9]|-[0-9][0-9]|-[0-9][0-9][0-9]) signal="${rssi}dBm" ;; *) signal='?dBm' ;; esac
+    # Live addresses, not a potentially stale saved dhcpcd lease.
+    if ip -o addr show dev "$iface" scope global 2>/dev/null | grep -q 'inet'; then
+        printf '%s %s\n' "${ssid:-hidden}" "$signal"
+    else
+        printf '%s IP? %s\n' "${ssid:-hidden}" "$signal"
+    fi
+}
+# SIGUSR1 audio/brightness refreshes should not repeatedly query Wi-Fi.
+mkdir -p "$RICE_RUNTIME"
+cache="$RICE_RUNTIME/wifi.status"
+now=$(date +%s)
+then=$(stat -c %Y "$cache" 2>/dev/null || printf 0)
+if [ "$((now - then))" -ge 0 ] && [ "$((now - then))" -lt 10 ]; then
+    cat "$cache"; exit 0
+fi
+result=$(poll_wifi)
+printf '%s\n' "$result" >"$cache.tmp.$$"
+mv -f "$cache.tmp.$$" "$cache"
+printf '%s\n' "$result"

@@ -1,0 +1,41 @@
+[global]
+    monitor = 0
+    follow = keyboard
+    width = 340
+    height = (0, 180)
+    origin = top-right
+    offset = (20, 55)
+    notification_limit = 4
+    font = DejaVu Sans 10
+    frame_width = 2
+    frame_color = "@COLOR4@"
+    separator_height = 2
+    separator_color = frame
+    padding = 14
+    horizontal_padding = 14
+    text_icon_padding = 0
+    corner_radius = 0
+    transparency = 0
+    icon_position = off
+    format = "<b>%s</b>\n%b"
+    markup = full
+    word_wrap = yes
+    mouse_left_click = close_current
+    mouse_middle_click = do_action
+    mouse_right_click = close_all
+
+[urgency_low]
+    background = "@BACKGROUND@"
+    foreground = "@FOREGROUND@"
+    timeout = 4
+
+[urgency_normal]
+    background = "@BACKGROUND@"
+    foreground = "@FOREGROUND@"
+    timeout = 6
+
+[urgency_critical]
+    background = "@BACKGROUND@"
+    foreground = "@FOREGROUND@"
+    frame_color = "@COLOR1@"
+    timeout = 0

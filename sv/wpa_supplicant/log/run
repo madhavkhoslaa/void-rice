@@ -1,0 +1,3 @@
+#!/bin/sh
+mkdir -p /var/log/rice/wpa_supplicant
+exec svlogd -tt /var/log/rice/wpa_supplicant

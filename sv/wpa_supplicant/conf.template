@@ -1,0 +1,3 @@
+# The installer substitutes the detected or explicitly selected interface.
+WPA_INTERFACE='@INTERFACE@'
+CONF_FILE='/etc/wpa_supplicant/wpa_supplicant.conf'

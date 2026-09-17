@@ -1,0 +1,25 @@
+#!/bin/sh
+# Log in on a local TTY, then run startx. Keep session setup outside dwm so
+# recompiling/restarting the WM cannot duplicate autostart processes.
+export PATH="$HOME/.local/bin:$PATH"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+export XDG_CURRENT_DESKTOP=dwm
+export XDG_SESSION_TYPE=x11
+export _JAVA_AWT_WM_NONREPARENTING=1
+
+# Prefer a runtime directory supplied by PAM. A minimal Void install may
+# have no session tracker; create a private, session-lifetime fallback.
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    if [ -d "/run/user/$(id -u)" ] && [ "$(stat -c %u "/run/user/$(id -u)")" = "$(id -u)" ]; then
+        XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    else
+        XDG_RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/rice-runtime.$(id -u).XXXXXX") || exit 1
+        export RICE_PRIVATE_RUNTIME=1
+    fi
+    export XDG_RUNTIME_DIR
+fi
+[ -d "$XDG_RUNTIME_DIR" ] && [ "$(stat -c %u "$XDG_RUNTIME_DIR")" = "$(id -u)" ] || exit 1
+[ "$(stat -c %a "$XDG_RUNTIME_DIR")" = 700 ] || exit 1
+exec dbus-run-session -- "$XDG_CONFIG_HOME/rice/x11/session"

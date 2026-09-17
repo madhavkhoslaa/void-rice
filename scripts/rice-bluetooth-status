@@ -1,0 +1,25 @@
+#!/bin/sh
+set -u
+export LC_ALL=C
+. "$HOME/.local/bin/rice-lib.sh"
+mkdir -p "$RICE_RUNTIME"
+cache="$RICE_RUNTIME/bluetooth.status"
+# slstatus ticks every 10s; BlueZ only needs polling every 30s.
+now=$(date +%s)
+then=$(stat -c %Y "$cache" 2>/dev/null || printf 0)
+if [ "$((now - then))" -ge 0 ] && [ "$((now - then))" -lt 30 ]; then
+    cat "$cache"; exit 0
+fi
+controller=$(timeout 3 bluetoothctl show 2>/dev/null) || controller=
+if ! printf '%s\n' "$controller" | grep -q '^Controller '; then
+    result='n/a'
+elif ! printf '%s\n' "$controller" | grep -q 'Powered: yes'; then
+    result='off'
+else
+    devices=$(timeout 3 bluetoothctl devices Connected 2>/dev/null) || devices=
+    count=$(printf '%s\n' "$devices" | grep -c '^Device ' || :)
+    if [ "$count" -gt 0 ]; then result="$count"; else result='on'; fi
+fi
+printf '%s\n' "$result" >"$cache.tmp.$$"
+mv -f "$cache.tmp.$$" "$cache"
+printf '%s\n' "$result"

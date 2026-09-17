@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+. "$HOME/.local/bin/rice-lib.sh"
+case "${1:-}" in
+    volume-up) wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+ ;;
+    volume-down) wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- ;;
+    mute) wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle ;;
+    brightness-up|brightness-down)
+        device=''
+        for path in /sys/class/backlight/intel_backlight /sys/class/backlight/*; do
+            [ -r "$path/max_brightness" ] || continue
+            device=${path##*/}; break
+        done
+        [ -n "$device" ] || { echo 'No backlight device.' >&2; exit 1; }
+        amount=+5%
+        [ "$1" != brightness-down ] || amount=5%-
+        brightnessctl -q -d "$device" -n 1 set "$amount"
+        ;;
+    *) echo 'usage: rice-controls {volume-up|volume-down|mute|brightness-up|brightness-down}' >&2; exit 2 ;;
+esac
+# slstatus has a native SIGUSR1 refresh handler. Validate the display's PID
+# before signalling; never start another status daemon for a key press.
+pid=$(cat "$RICE_RUNTIME/status.pid" 2>/dev/null || :)
+case "$pid" in ''|*[!0-9]*) exit 0 ;; esac
+exe=$(readlink "/proc/$pid/exe" 2>/dev/null || :)
+case "$exe" in "$HOME/.local/bin/rice-slstatus"|"$HOME/.local/bin/rice-slstatus (deleted)")
+    kill -USR1 "$pid" 2>/dev/null || : ;;
+esac

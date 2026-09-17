@@ -1,0 +1,26 @@
+# Custom package: upstream Void's 'picom' is NOT the ibhagwan fork.
+pkgname=picom-ibhagwan
+version=8.2.20211104
+revision=1
+_commit=c4107bb6cc17773fdc6c48bb2e475ef957513c7a
+wrksrc="picom-${_commit}"
+build_style=meson
+configure_args="-Dwith_docs=false -Dcompton=false -Ddbus=false"
+hostmakedepends="pkg-config"
+makedepends="libX11-devel libXext-devel libxcb-devel libconfig-devel
+ libev-devel pcre-devel pixman-devel uthash xcb-util-image-devel
+ xcb-util-renderutil-devel libglvnd-devel"
+short_desc="Ibhagwan's X11 compositor fork for the Void dwm rice"
+maintainer="Rice user <rice@localhost>"
+license="MPL-2.0 AND MIT"
+homepage="https://github.com/ibhagwan/picom"
+distfiles="https://github.com/ibhagwan/picom/archive/${_commit}.tar.gz"
+checksum=18df179c01d1663a62e378482eb6a7f40b4df0f961dbf91cdcef4ac8b1cbbde9
+
+post_install() {
+    mv "${DESTDIR}/usr/bin/picom" "${DESTDIR}/usr/bin/picom-ibhagwan"
+    rm -f "${DESTDIR}/usr/bin/picom-trans"
+    rm -f "${DESTDIR}/usr/share/applications/picom.desktop"
+    vlicense COPYING
+    vlicense LICENSES/MIT
+}

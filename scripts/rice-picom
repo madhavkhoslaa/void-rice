@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+. "$HOME/.local/bin/rice-lib.sh"
+mkdir -p "$RICE_RUNTIME" "$RICE_CACHE/log"
+exec 9>"$RICE_RUNTIME/picom.lock"
+flock 9
+pidfile="$RICE_RUNTIME/picom.pid"
+statefile="$RICE_RUNTIME/picom.state"
+owned_pid() {
+    pid=$(cat "$pidfile" 2>/dev/null || :)
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null || :)
+    case "$exe" in /usr/bin/picom-ibhagwan|'/usr/bin/picom-ibhagwan (deleted)')
+        kill -0 "$pid" 2>/dev/null ;; *) return 1 ;; esac
+}
+state=off
+if owned_pid; then state=$(cat "$statefile" 2>/dev/null || printf low); fi
+case "${1:-status}" in
+    status) printf '%s\n' "$state"; exit 0 ;;
+    toggle) if [ "$state" = off ]; then target=low; else target=off; fi ;;
+    effects) if [ "$state" = effects ]; then target=low; else target=effects; fi ;;
+    low|off) target=$1 ;;
+    on) target=low ;;
+    restore-effects) target=effects ;;
+    *) echo 'usage: rice-picom {status|low|off|toggle|effects}' >&2; exit 2 ;;
+esac
+[ "$target" != "$state" ] || exit 0
+if owned_pid; then
+    kill "$pid"
+    i=0
+    while owned_pid && [ "$i" -lt 50 ]; do sleep 0.05; i=$((i + 1)); done
+    if owned_pid; then echo 'picom did not stop; see its log.' >&2; exit 1; fi
+fi
+rm -f "$pidfile"
+printf 'off\n' >"$statefile"
+[ "$target" != off ] || exit 0
+: "${DISPLAY:?Run this inside the X session}"
+conf="$RICE_CONFIG/picom/picom.conf"
+[ "$target" != effects ] || conf="$RICE_CONFIG/picom/effects.conf"
+/usr/bin/picom-ibhagwan --config "$conf" >>"$RICE_CACHE/log/picom.log" 2>&1 9>&- &
+printf '%s\n' "$!" >"$pidfile"
+sleep 0.3
+if ! owned_pid; then
+    echo "picom failed; inspect $RICE_CACHE/log/picom.log" >&2
+    exit 1
+fi
+printf '%s\n' "$target" >"$statefile"

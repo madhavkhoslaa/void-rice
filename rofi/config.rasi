@@ -1,0 +1,10 @@
+configuration {
+    modi: "drun,run";
+    font: "DejaVu Sans 11";
+    show-icons: false;
+    display-drun: "Apps";
+    display-run: "Run";
+    drun-display-format: "{name}";
+    disable-history: false;
+}
+@theme "rice"

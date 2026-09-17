@@ -1,0 +1,15 @@
+#!/bin/sh
+# Temporarily remove compositor overhead around a compile command.
+set -u
+[ "${1:-}" != -- ] || shift
+[ "$#" -gt 0 ] || { echo 'usage: rice-build -- make -j8' >&2; exit 2; }
+before=$(rice-picom status) || exit 1
+restore() {
+    case "$before" in effects) rice-picom restore-effects ;; low) rice-picom low ;; esac
+}
+trap restore EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+rice-picom off || exit 1
+"$@"
+exit "$?"

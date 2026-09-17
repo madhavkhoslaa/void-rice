@@ -1,0 +1,3 @@
+#!/bin/sh
+mkdir -p /var/log/rice/dhcpcd
+exec svlogd -tt /var/log/rice/dhcpcd

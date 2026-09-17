@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Root-only phase called by install.sh after all downloads/builds finish.
+set -euo pipefail
+[[ $EUID == 0 && $# == 5 ]] || { echo 'Run install.sh as your desktop user.' >&2; exit 2; }
+root=$1 user=$2 iface=$3 country=$4 stamp=$5
+backup="/var/backups/rice/$stamp"
+mkdir -p "$backup"
+save() {
+    local path=$1
+    if [[ -e $path || -L $path ]]; then
+        mkdir -p "$backup$(dirname "$path")"
+        cp -a -- "$path" "$backup$path"
+    fi
+}
+getent group ricewifi >/dev/null || groupadd -r ricewifi
+for group in audio video input render bluetooth ricewifi; do
+    if getent group "$group" >/dev/null; then usermod -aG "$group" "$user"; fi
+done
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=backlight --action=add
+
+mkdir -p /etc/wpa_supplicant
+conf=/etc/wpa_supplicant/wpa_supplicant.conf
+save "$conf"
+# Preserve existing network blocks, including WPA3 and enterprise settings.
+python3 - "$conf" "$country" <<'PY'
+from pathlib import Path
+import os
+import re
+import sys
+path = Path(sys.argv[1])
+text = path.read_text() if path.exists() else ""
+text = re.sub(r"(?m)^\s*ctrl_interface\s*=.*\n?", "", text)
+text = re.sub(r"(?m)^\s*update_config\s*=.*\n?", "", text)
+if sys.argv[2]:
+    text = re.sub(r"(?m)^\s*country\s*=.*\n?", "", text)
+    text = "country=" + sys.argv[2] + "\n" + text
+text = "ctrl_interface=DIR=/run/wpa_supplicant GROUP=ricewifi\nupdate_config=0\n" + text
+path.write_text(text.rstrip() + "\n")
+os.chmod(path, 0o600)
+PY
+
+for service in dhcpcd wpa_supplicant bluetoothd; do
+    for file in run log/run check; do
+        [[ -f "$root/sv/$service/$file" ]] || continue
+        target="/etc/sv/$service/$file"
+        save "$target"
+        install -D -m 0755 "$root/sv/$service/$file" "$target"
+    done
+done
+save /etc/sv/wpa_supplicant/conf
+sed "s/@INTERFACE@/$iface/g" "$root/sv/wpa_supplicant/conf.template" >/etc/sv/wpa_supplicant/conf
+chmod 0644 /etc/sv/wpa_supplicant/conf
+
+# Make PipeWire the ALSA default as documented by Void.
+mkdir -p /etc/alsa/conf.d
+for name in 50-pipewire.conf 99-pipewire-default.conf; do
+    save "/etc/alsa/conf.d/$name"
+    ln -sfn "/usr/share/alsa/alsa.conf.d/$name" "/etc/alsa/conf.d/$name"
+done
+
+# dbus uses Void's packaged run/check scripts. BlueZ depends on this service.
+for service in dbus wpa_supplicant dhcpcd bluetoothd; do
+    target="/var/service/$service"
+    if [[ -L $target && $(readlink -f "$target") != "/etc/sv/$service" ]]; then
+        save "$target"
+        sv down "$target" || :
+        rm "$target"
+    fi
+    if [[ ! -e $target && ! -L $target ]]; then
+        ln -s "/etc/sv/$service" "$target"
+    fi
+    [[ $(readlink -f "$target") == "/etc/sv/$service" ]] || {
+        echo "Unexpected service directory: $target" >&2; exit 1;
+    }
+    if [[ -e /etc/sv/$service/down ]]; then
+        save "/etc/sv/$service/down"
+        rm "/etc/sv/$service/down"
+    fi
+done
+wait_up() {
+    local attempt
+    for ((attempt=0; attempt<15; attempt++)); do
+        if sv -w 1 up "$1" >/dev/null 2>&1; then return 0; fi
+        sleep 1
+    done
+    sv status "$1" >&2 || :
+    echo "Service failed to start: $1; see /var/log/rice/" >&2
+    return 1
+}
+wait_up /var/service/dbus
+# runsv discovers log/ on startup. Recycle the supervisor after adding log/
+# to an existing service; runsvdir re-creates it. All downloads are complete.
+for service in wpa_supplicant dhcpcd bluetoothd; do
+    sv -w 15 exit "/var/service/$service" >/dev/null 2>&1 || :
+    wait_up "/var/service/$service"
+    wait_up "/var/service/$service/log"
+done
+printf 'System backups: %s\n' "$backup"

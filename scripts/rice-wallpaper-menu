@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Pick a file from ~/Pictures/Wallpapers, safely handling spaces in names."""
+import os
+from pathlib import Path
+import subprocess
+
+folder = Path.home() / "Pictures/Wallpapers"
+files = sorted(p for p in folder.rglob("*") if p.is_file()
+               and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+               and "\n" not in str(p))
+if not files:
+    subprocess.run(["notify-send", "Wallpaper", f"Put images in {folder}"], check=False)
+    raise SystemExit(0)
+choices = "\n".join(str(p.relative_to(folder)) for p in files)
+result = subprocess.run(["rofi", "-dmenu", "-p", "Wallpaper", "-format", "i"],
+                        input=choices, text=True, capture_output=True)
+if result.returncode == 0 and result.stdout.strip().isdigit():
+    index = int(result.stdout.strip())
+    if 0 <= index < len(files):
+        command = [str(Path.home() / ".local/bin/rice-theme"), str(files[index])]
+        status = subprocess.run(command).returncode
+        if status:
+            subprocess.run(["notify-send", "Wallpaper build failed",
+                            "Run rice-theme in a terminal for diagnostics."], check=False)
+        raise SystemExit(status)

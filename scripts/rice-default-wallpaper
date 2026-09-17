@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""Generate the bundled original, static layered-landscape wallpaper."""
+from pathlib import Path
+import sys
+from PIL import Image, ImageDraw
+
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+image = Image.new("RGB", (1920, 1080), "#151b27")
+draw = ImageDraw.Draw(image)
+for y in range(1080):
+    a = y / 1080
+    draw.line((0, y, 1920, y), fill=(int(21 + 12*a), int(27 + 17*a), int(39 + 23*a)))
+draw.ellipse((1360, 165, 1570, 375), fill="#d1bb9c")
+draw.polygon([(0, 640), (360, 460), (620, 700), (1110, 440), (1630, 650),
+              (1920, 530), (1920, 1080), (0, 1080)], fill="#657b87")
+draw.polygon([(0, 805), (450, 640), (940, 850), (1440, 610), (1920, 785),
+              (1920, 1080), (0, 1080)], fill="#465769")
+draw.polygon([(0, 915), (350, 820), (800, 1020), (1330, 825), (1920, 960),
+              (1920, 1080), (0, 1080)], fill="#2c384c")
+image.save(path, "PNG")

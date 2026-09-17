@@ -1,0 +1,13 @@
+#!/bin/sh
+# The kernel backlight interface supplies these values without a daemon.
+set -u
+for device in /sys/class/backlight/intel_backlight /sys/class/backlight/*; do
+    [ -r "$device/max_brightness" ] || continue
+    read -r maximum <"$device/max_brightness"
+    # Match brightnessctl's requested level; actual_brightness can lag briefly.
+    read -r current <"$device/brightness"
+    case "$maximum:$current" in *[!0-9:]*|0:*) continue ;; esac
+    printf '%s%%\n' "$(((100 * current + maximum / 2) / maximum))"
+    exit 0
+done
+printf 'n/a\n'

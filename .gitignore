@@ -1,0 +1,14 @@
+# prowl-agent: derived state
+.prowl/index.db*
+.prowl/cache/
+.prowl/logs/
+.prowl/editor/
+.prowl/setup-applies.json
+.prowl-setup.lock
+# /prowl-agent: derived state
+
+# Local tooling/build state is not part of the installable bundle.
+.prowl/
+__pycache__/
+*.py[cod]
+*.o

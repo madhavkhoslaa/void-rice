@@ -1,0 +1,5 @@
+#!/bin/sh
+exec 2>&1
+# -B: foreground; -M: manager for wired + wireless interfaces.
+# Disable the supplicant hook: runit alone owns wpa_supplicant.
+exec /usr/bin/dhcpcd -B -M -C wpa_supplicant

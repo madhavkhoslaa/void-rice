@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+. "$HOME/.local/bin/rice-lib.sh"
+mkdir -p "$RICE_RUNTIME" "$RICE_CACHE/log"
+exec 8>"$RICE_RUNTIME/session.lock"
+flock -n 8 || { echo 'A rice session already owns this display.' >&2; exit 1; }
+pipewire_pid='' dunst_pid='' status_pid='' dwm_pid=''
+cleanup() {
+    trap - EXIT HUP INT TERM
+    rice-picom off || :
+    for pid in "$dwm_pid" "$status_pid" "$dunst_pid"; do
+        [ -z "$pid" ] || kill "$pid" 2>/dev/null || :
+    done
+    if [ -n "$pipewire_pid" ]; then
+        # Only the children of the PipeWire process launched by this session.
+        pkill -TERM -P "$pipewire_pid" 2>/dev/null || :
+        kill "$pipewire_pid" 2>/dev/null || :
+    fi
+    rm -f "$RICE_RUNTIME/dwm.pid" "$RICE_RUNTIME/status.pid"
+    if [ "${RICE_PRIVATE_RUNTIME:-0}" = 1 ]; then
+        rm -rf -- "$XDG_RUNTIME_DIR"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 0' HUP INT TERM
+
+xrdb -merge "$RICE_CONFIG/x11/Xresources"
+xsetroot -cursor_name left_ptr
+[ ! -f "$RICE_DATA/wallpaper" ] || feh --no-fehbg --bg-fill "$RICE_DATA/wallpaper"
+
+# Void's context.exec drop-ins launch WirePlumber and pipewire-pulse in
+# the correct order from this single autostart command.
+if ! pgrep -u "$(id -u)" -x pipewire >/dev/null; then
+    pipewire >>"$RICE_CACHE/log/pipewire.log" 2>&1 8>&- &
+    pipewire_pid=$!
+fi
+dunst -config "${XDG_CONFIG_HOME:-$HOME/.config}/dunst/dunstrc" >>"$RICE_CACHE/log/dunst.log" 2>&1 8>&- &
+dunst_pid=$!
+rice-picom low 8>&- || echo 'Compositor unavailable; see the picom log.' >&2
+"$HOME/.local/bin/rice-slstatus" >>"$RICE_CACHE/log/status.log" 2>&1 8>&- &
+status_pid=$!
+printf '%s\n' "$status_pid" >"$RICE_RUNTIME/status.pid"
+"$HOME/.local/bin/rice-dwm" >>"$RICE_CACHE/log/dwm.log" 2>&1 8>&- &
+dwm_pid=$!
+printf '%s\n' "$dwm_pid" >"$RICE_RUNTIME/dwm.pid"
+wait "$dwm_pid"
