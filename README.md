@@ -25,9 +25,10 @@ The installer uses `sudo`, `doas`, or `su` for root operations. It updates XBPS,
 updates the Void system, installs packages, builds the pinned software, copies
 configs, creates the runit links, and provisions permissions. It generates an
 original default wallpaper, so no image download or manual config assembly is
-needed. Existing Wi-Fi network blocks are retained; otherwise it prompts for
-WPA2-Personal credentials. Its final service activation can briefly reconnect
-the network; downloads and builds finish first.
+needed. **NetworkManager manages Ethernet and Wi-Fi; BlueZ + Blueman handle
+Bluetooth.** Existing NM profiles and Bluetooth pairings are preserved. The
+legacy beta's WPA2/open profiles are imported once before the network handover.
+Its first service migration can briefly reconnect the network.
 
 **Log out fully and log in again on a local TTY**, then run:
 
@@ -35,7 +36,7 @@ the network; downloads and builds finish first.
 startx
 ```
 
-That new login picks up the device, Bluetooth and supplicant-control groups.
+That new login picks up the device, `network` and `bluetooth` groups.
 The installer replaces `~/.xinitrc` with this session's entry point. It backs up
 existing managed files under `~/.local/share/rice/backups/TIMESTAMP/` and
 `/var/backups/rice/TIMESTAMP/`; custom XDG directories are respected.
@@ -43,14 +44,29 @@ existing managed files under `~/.local/share/rice/backups/TIMESTAMP/` and
 Optional installation parameters:
 
 ```sh
-RICE_WIFI_INTERFACE=wlp0s20f3 RICE_COUNTRY=US RICE_JOBS=2 \
+RICE_JOBS=2 \
   RICE_WALLPAPER="$HOME/Pictures/my wallpaper.jpg" ./install.sh
 ```
 
-Use your actual interface/country. Interface selection is automatic with one
-adapter, interactive with several, and `none` with no wireless adapter.
-The two-job default applies to the rice builds to limit contention/heat.
+NetworkManager discovers interfaces automatically, including Ethernet-only VMs.
+Use **Super+Shift+n** for `nmtui` and **Super+Shift+b** for Blueman.
+The two-job default applies to rice builds to limit contention/heat.
 The installer is guarded against running on Arch or as the root desktop user.
+
+### Updating / running the installer again
+
+```sh
+git pull --ff-only
+./install.sh
+```
+
+Saved NM connections/passwords, BlueZ pairings and the current wallpaper are
+retained. Running services are brought `up` without a forced restart. The
+installer resumes interrupted initial Git fetches, reuses an installed picom
+package when its template is unchanged, and prevents concurrent installs.
+It backs up and reapplies the bundle's UI templates; keep everyday custom edits
+in those backups or use `rice-rebuild` when only recompiling your edited config.
+See [the migration details](scripts/README-network.md) for legacy/custom networks.
 
 ## Included files
 
@@ -80,6 +96,7 @@ rice-config/
 ├── scripts/
 │   ├── README-network.md
 │   ├── rice-lib.sh
+│   ├── rice-install-lib.sh
 │   ├── rice-theme
 │   ├── rice-rebuild
 │   ├── rice-wallpaper-menu
@@ -90,26 +107,29 @@ rice-config/
 │   ├── rice-audio-status
 │   ├── rice-controls
 │   ├── rice-wifi-add
+│   ├── rice-network-migrate
 │   ├── rice-picom
 │   ├── rice-build
 │   └── rice-system-setup
 ├── sv/
-│   ├── dhcpcd/{run,log/run}
-│   ├── wpa_supplicant/{run,check,conf.template,log/run}
-│   └── bluetoothd/{run,log/run}
+│   ├── README.md
+│   └── legacy-services.sha256
+├── tests/
+│   ├── test_installer.py
+│   └── test_network.py
 └── xbps-src/picom-ibhagwan/template
 ```
 
 Every listed file is provided in full. Templates are intentional inputs consumed
 by the installer/theme renderer; there are no config stubs to fill in. The only
-machine-specific inputs are interface/country and network credentials.
+machine-specific network settings are managed through NetworkManager.
 
 ## Bar: six fields
 
 Your later brightness/audio additions expand the original four-field request:
 
 ```text
-[Void] │ ━ ● · · · · · · ·  2 [windows] 1/3       [clock] 14:30 Thu 17       [wifi] MySSID -54dBm   [BT] on   [sun] 65%   [audio] 40%
+[Void] │ ━ ● · · · · · · ·  2 [windows] 1/3       [clock] 14:30 Thu 17       [wifi] MySSID 78%   [BT] on   [sun] 65%   [audio] 40%
 ```
 
 The supplied image is the visual reference: **28px, edge-to-edge, nearly black
@@ -123,7 +143,8 @@ the optional compositor effects apply to application windows.
    no polling or EWMH approximation. Multiple viewed tags appear as `1+3`.
    Window numbering follows the visible client list on that monitor, including
    floating clients. An empty view is `0/0`. Occupied tags have brighter dots.
-2. **Wi-Fi SSID/status and RSSI** — wpa_supplicant, 10-second cache.
+2. **Network status** — NetworkManager Wi-Fi SSID/strength percentage, falling
+   back to Ethernet. 10-second cache; AP polling does not trigger scans.
 3. **Bluetooth power/connection status** — BlueZ, 30-second cache.
 4. **Brightness** — the kernel backlight sysfs values.
 5. **Audio volume/mute** — PipeWire/WirePlumber's `wpctl`.
@@ -136,7 +157,7 @@ patch is compiled in but `showsystray = 0` keeps the six-field default exact.
 Set it to `1` in the dwm template and run `rice-rebuild` to display XEmbed icons.
 That adds application-provided icons to the bar, as expected for a tray.
 
-Detailed commands, socket permissions, pairing, device control and status file
+Detailed commands, group permissions, pairing, device control and status file
 semantics are in **[scripts/README-network.md](scripts/README-network.md)**.
 
 ## dwm patches and interactions
@@ -260,6 +281,7 @@ lock; it controls only its own compositor instance.
 | Volume up/down / mute | Default PipeWire output ±5% / mute |
 | Super+F9 / Super+F10 | Compositor off/on / effects toggle |
 | Super+Shift+w | Wallpaper picker |
+| Super+Shift+n / Super+Shift+b | NetworkManager (`nmtui`) / Blueman Bluetooth Manager |
 | Super+Shift+r / Super+Shift+q | Restart WM / exit X session |
 | Super+Shift+c | Close selected client |
 
@@ -275,7 +297,7 @@ sudo xbps-install -y base-devel git curl ca-certificates pkg-config python3 pyth
   libX11-devel libXft-devel libXinerama-devel libXext-devel fontconfig-devel
 sudo xbps-install -y xorg-minimal mesa-dri linux-firmware-intel linux-firmware-network \
   intel-media-driver sof-firmware dejavu-fonts-ttf nerd-fonts-symbols-ttf xterm xprop xrdb xsetroot xset
-sudo xbps-install -y runit dbus dhcpcd wpa_supplicant bluez iproute2 util-linux \
+sudo xbps-install -y runit dbus NetworkManager bluez blueman iproute2 util-linux \
   procps-ng shadow bash
 sudo xbps-install -y pipewire wireplumber libspa-bluetooth alsa-pipewire pulseaudio-utils
 sudo xbps-install -y pywal ImageMagick feh rofi dunst libnotify brightnessctl
@@ -289,6 +311,10 @@ Xorg, xinit/startx, xauth and libinput input support. `wireplumber` supplies
 and the tools used for runtime checks.
 `nerd-fonts-symbols-ttf` supplies the compact bar icons without installing the
 entire Nerd Fonts collection; DejaVu Sans Mono supplies the text.
+`NetworkManager` supplies `nmcli`, `nmtui` and `nm-online`, and pulls in its
+supplicant backend. `blueman` supplies the Bluetooth GUI and session pairing
+agent. The enabled runit services are the packaged `dbus`, `NetworkManager` and
+`bluetoothd` services; custom network run scripts are not copied into `/etc/sv`.
 
 **Custom xbps-src build required: `picom-ibhagwan`.** Void's repository package
 named `picom` is the upstream fork, not ibhagwan's. The included template builds
@@ -320,14 +346,16 @@ repositories. The first custom build needs space for an xbps-src masterdir.
 
 dwm and slstatus are intentional **user-local source builds**, not repository
 packages. slstatus is pinned at `675c83912ea1aca9834448aaa87a040bc9990c52`.
-Only its datetime and run-command components are compiled. Re-running the
-installer backs up and reapplies this bundle; everyday template edits should
-use `rice-rebuild` rather than reinstalling the bundle.
+Only its datetime and run-command components are compiled. Both binaries are
+rebuilt on installation so they pick up the latest bundle's bar/keybindings.
 
 ## VM verification
 
 On the Arch authoring machine, the generated dwm and slstatus configurations
 were compiled with existing tools and shell scripts were syntax/lint checked.
+Offline tests cover profile migration, repeated service activation, interrupted
+checkout recovery and NetworkManager status parsing. The generated connection
+files were also accepted by NetworkManager's real offline parser.
 The Void installer and hardware services must be exercised in your Void VM;
 the full xbps-src/picom build and Intel hardware behavior are not claimed as
 tested here.
@@ -335,8 +363,9 @@ tested here.
 After installing and starting X in the VM:
 
 ```sh
-sudo sv status /var/service/dbus /var/service/dhcpcd \
-  /var/service/wpa_supplicant /var/service/bluetoothd
+sudo sv status /var/service/dbus /var/service/NetworkManager /var/service/bluetoothd
+nmcli device status
+bluetoothctl show
 wpctl status
 pactl info
 rice-picom status
@@ -349,12 +378,24 @@ open through the WM restart. Check rofi and send a themed notification with
 acceleration may reject the effects profile; low/off remain usable. Brightness
 and physical Wi-Fi/Bluetooth require hardware or passthrough to test.
 
-Session logs live in `~/.cache/rice/log/`. Network/Bluetooth logs live in
-`/var/log/rice/{dhcpcd,wpa_supplicant,bluetoothd}/current`.
+Test the update path by running `./install.sh` again: NM profile UUIDs should
+stay the same, pairings should remain, and no standalone dhcpcd/supplicant
+services should be enabled. Open the connection and Bluetooth managers using
+the new shortcuts.
+
+Run the non-privileged offline regression suite with:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+```
+
+It uses temporary directories and a simulated runit CLI, never the host's
+services or package manager. Session logs live in `~/.cache/rice/log/`, including
+the Blueman pairing agent's log.
 
 ## References
 
-- [Void wpa_supplicant handbook](https://docs.voidlinux.org/config/network/wpa_supplicant.html)
+- [Void NetworkManager handbook](https://docs.voidlinux.org/config/network/networkmanager.html)
 - [Void runit services](https://docs.voidlinux.org/config/services/index.html)
 - [Void Bluetooth handbook](https://docs.voidlinux.org/config/bluetooth.html)
 - [Void PipeWire handbook](https://docs.voidlinux.org/config/media/pipewire.html)

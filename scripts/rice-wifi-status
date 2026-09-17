@@ -1,47 +1,94 @@
-#!/bin/sh
-set -u
-export LC_ALL=C
-. "$HOME/.local/bin/rice-lib.sh"
-poll_wifi() {
-    iface=$(cat "$RICE_CONFIG/wifi-interface" 2>/dev/null || :)
-    if [ -z "$iface" ] || [ ! -d "/sys/class/net/$iface/wireless" ]; then
-        printf 'absent\n'; return
-    fi
-    # Permission comes from GROUP=ricewifi; no sudo in the bar.
-    status=$(timeout 2 wpa_cli -p /run/wpa_supplicant -i "$iface" status 2>/dev/null) || {
-        printf 'control?\n'; return
-    }
-    state=$(printf '%s\n' "$status" | sed -n 's/^wpa_state=//p')
-    case "$state" in
-        COMPLETED) ;;
-        SCANNING|ASSOCIATING|ASSOCIATED|AUTHENTICATING|4WAY_HANDSHAKE|GROUP_HANDSHAKE)
-            printf 'connecting\n'; return ;;
-        DISCONNECTED|INACTIVE|INTERFACE_DISABLED)
-            printf 'disconnected\n'; return ;;
-        *) printf 'control?\n'; return ;;
-    esac
-    # Keep wpa_cli escapes literal, sanitize separators (including the clock's
-    # semicolon), and truncate the display label to keep the right cluster slim.
-    ssid=$(printf '%s\n' "$status" | sed -n 's/^ssid=//p' | tr -d '\000-\037\177' | tr '|;' '//' | cut -c1-20)
-    rssi=$(timeout 2 wpa_cli -p /run/wpa_supplicant -i "$iface" signal_poll 2>/dev/null |
-        sed -n 's/^RSSI=//p')
-    case "$rssi" in -[0-9]|-[0-9][0-9]|-[0-9][0-9][0-9]) signal="${rssi}dBm" ;; *) signal='?dBm' ;; esac
-    # Live addresses, not a potentially stale saved dhcpcd lease.
-    if ip -o addr show dev "$iface" scope global 2>/dev/null | grep -q 'inet'; then
-        printf '%s %s\n' "${ssid:-hidden}" "$signal"
-    else
-        printf '%s IP? %s\n' "${ssid:-hidden}" "$signal"
-    fi
-}
-# SIGUSR1 audio/brightness refreshes should not repeatedly query Wi-Fi.
-mkdir -p "$RICE_RUNTIME"
-cache="$RICE_RUNTIME/wifi.status"
-now=$(date +%s)
-then=$(stat -c %Y "$cache" 2>/dev/null || printf 0)
-if [ "$((now - then))" -ge 0 ] && [ "$((now - then))" -lt 10 ]; then
-    cat "$cache"; exit 0
-fi
-result=$(poll_wifi)
-printf '%s\n' "$result" >"$cache.tmp.$$"
-mv -f "$cache.tmp.$$" "$cache"
-printf '%s\n' "$result"
+#!/usr/bin/env python3
+"""Compact NetworkManager Wi-Fi/Ethernet status; no scans and no privileged calls."""
+import os
+from pathlib import Path
+import re
+import subprocess
+import time
+
+
+def fields(line):
+    """Decode nmcli's terse colon/backslash escaping without shell evaluation."""
+    values, value, escaped = [], [], False
+    for char in line:
+        if escaped:
+            value.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == ":":
+            values.append("".join(value))
+            value = []
+        else:
+            value.append(char)
+    if escaped:
+        value.append("\\")
+    return values + ["".join(value)]
+
+
+def label(value):
+    return "".join("/" if char in ";|" else char for char in value if char.isprintable())[:20]
+
+
+def nmcli(*args):
+    result = subprocess.run(["nmcli", "--wait", "2", *args], text=True, capture_output=True,
+                            timeout=3, check=True, env={**os.environ, "LC_ALL": "C"})
+    return result.stdout.strip()
+
+
+def network_status(query=nmcli):
+    wifi, ethernet = "\uf1eb", "\uf0e8"
+    try:
+        rows = [fields(line) for line in query("-t", "--escape", "yes", "-f",
+                                             "DEVICE,TYPE,STATE", "device", "status").splitlines()]
+        devices = [row for row in rows if len(row) == 3]
+        # Show an active Wi-Fi link; otherwise show wired connectivity.
+        for device, kind, state in devices:
+            if kind == "wifi" and state.startswith("connected"):
+                aps = query("-t", "--escape", "yes", "-f", "IN-USE,SSID,SIGNAL", "device",
+                            "wifi", "list", "ifname", device, "--rescan", "no")
+                for row in map(fields, aps.splitlines()):
+                    if len(row) == 3 and row[0] == "*":
+                        strength = row[2] + "%" if row[2].isdigit() and 0 <= int(row[2]) <= 100 else "?%"
+                        return f"{wifi} {label(row[1]) or 'hidden'} {strength}"
+                return f"{wifi} connected"
+        for device, kind, state in devices:
+            if kind == "ethernet" and state.startswith("connected"):
+                return f"{ethernet} {label(device)}"
+        wireless = [row for row in devices if row[1] == "wifi"]
+        if wireless:
+            if query("-g", "WIFI", "general") == "disabled":
+                return f"{wifi} off"
+            if any(row[2].startswith("connecting") for row in wireless):
+                return f"{wifi} connecting"
+            if all(row[2] == "unmanaged" for row in wireless):
+                return f"{wifi} unmanaged"
+            return f"{wifi} disconnected"
+        if any(row[1] == "ethernet" for row in devices):
+            return f"{ethernet} disconnected"
+        return f"{ethernet} absent"
+    except (OSError, subprocess.SubprocessError):
+        return f"{ethernet} NM unavailable"
+
+
+def main():
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    base = Path(os.environ.get("XDG_RUNTIME_DIR", cache_home / "rice/runtime"))
+    display = re.sub(r"[^a-zA-Z0-9_-]", "_", os.environ.get("DISPLAY", "headless"))
+    cache = base / ("rice-" + display) / "network.status"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if 0 <= time.time() - cache.stat().st_mtime < 10:
+            print(cache.read_text().strip())
+            return
+    except FileNotFoundError:
+        pass
+    value = network_status()
+    temp = cache.with_name(f".network.{os.getpid()}")
+    temp.write_text(value + "\n")
+    os.replace(temp, cache)
+    print(value)
+
+
+if __name__ == "__main__":
+    main()

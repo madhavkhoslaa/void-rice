@@ -1,34 +1,3 @@
-#!/usr/bin/env bash
-# Interactive WPA2-Personal provisioning. Password is never a process argument.
-set -euo pipefail
-if (( EUID != 0 )); then
-    if command -v sudo >/dev/null && sudo -v; then
-        exec sudo "$0" "$@"
-    elif command -v doas >/dev/null; then
-        exec doas "$0" "$@"
-    else
-        printf -v command '%q ' "$0" "$@"
-        exec su -s /bin/bash -c "$command"
-    fi
-fi
-source /etc/sv/wpa_supplicant/conf
-[[ $WPA_INTERFACE != none ]] || {
-    echo 'No wireless interface configured. Re-run install.sh with RICE_WIFI_INTERFACE.' >&2
-    exit 1
-}
-read -r -p 'WPA2-Personal SSID (Enter to leave configuration unchanged): ' ssid
-[[ -n "$ssid" ]] || exit 0
-read -r -s -p 'Passphrase: ' passphrase
-printf '\n'
-umask 077
-temp=$(mktemp /etc/wpa_supplicant/.rice-network.XXXXXX)
-trap 'rm -f "$temp" "$temp.merged"' EXIT
-printf '%s\n' "$passphrase" | wpa_passphrase "$ssid" | sed '/^[[:space:]]*#psk=/d' >"$temp"
-unset passphrase
-grep -q '^[[:space:]]*psk=' "$temp"
-cp -a "$CONF_FILE" "$CONF_FILE.backup.$(date +%Y%m%d-%H%M%S)"
-cat "$CONF_FILE" "$temp" >"$temp.merged"
-install -m 0600 "$temp.merged" "$CONF_FILE"
-rm -f "$temp.merged"
-wpa_cli -p /run/wpa_supplicant -i "$WPA_INTERFACE" reconfigure
-echo 'Saved. dhcpcd will configure IP automatically once Wi-Fi associates.'
+#!/bin/sh
+# Keep the existing command name working; NetworkManager owns credentials now.
+exec nmtui-connect

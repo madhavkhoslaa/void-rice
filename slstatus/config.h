@@ -3,7 +3,7 @@ const unsigned int interval = 10000;
 static const char unknown_str[] = "?";
 #define MAXLEN 1024
 static const struct arg args[] = {
-    { run_command, "\uf1eb %s   ", "rice-wifi-status" },
+    { run_command, "%s   ", "rice-wifi-status" },
     { run_command, "\uf293 %s   ", "rice-bluetooth-status" },
     { run_command, "\uf185 %s   ", "rice-brightness-status" },
     { run_command, "\uf028 %s ", "rice-audio-status" },

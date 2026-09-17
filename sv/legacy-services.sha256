@@ -1,0 +1,4 @@
+# package sha256 original-path (exact first-beta scripts, for one-time restoration)
+dhcpcd 7838a1494900a6f9531b78f61b74471afed8351e319c85e8cc7135bb078c6ae4 /etc/sv/dhcpcd/run
+wpa_supplicant 21c620e278b77711453a077b944d9ce08b82f11fd880faffff2e47807e1bddaf /etc/sv/wpa_supplicant/run
+bluez dbba28fccf2d05560e31d50a4f7b96b24005100e868cef4d700543659b396dc7 /etc/sv/bluetoothd/run

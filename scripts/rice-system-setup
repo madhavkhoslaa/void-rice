@@ -1,83 +1,15 @@
 #!/usr/bin/env bash
-# Root-only phase called by install.sh after all downloads/builds finish.
-set -euo pipefail
-[[ $EUID == 0 && $# == 5 ]] || { echo 'Run install.sh as your desktop user.' >&2; exit 2; }
-root=$1 user=$2 iface=$3 country=$4 stamp=$5
-backup="/var/backups/rice/$stamp"
-mkdir -p "$backup"
+# Root phase of install.sh. Functions are sourceable for isolated service tests.
+set -Eeuo pipefail
+
 save() {
     local path=$1
-    if [[ -e $path || -L $path ]]; then
+    if [[ ( -e $path || -L $path ) && ! -e $backup$path && ! -L $backup$path ]]; then
         mkdir -p "$backup$(dirname "$path")"
         cp -a -- "$path" "$backup$path"
     fi
 }
-getent group ricewifi >/dev/null || groupadd -r ricewifi
-for group in audio video input render bluetooth ricewifi; do
-    if getent group "$group" >/dev/null; then usermod -aG "$group" "$user"; fi
-done
-udevadm control --reload-rules
-udevadm trigger --subsystem-match=backlight --action=add
 
-mkdir -p /etc/wpa_supplicant
-conf=/etc/wpa_supplicant/wpa_supplicant.conf
-save "$conf"
-# Preserve existing network blocks, including WPA3 and enterprise settings.
-python3 - "$conf" "$country" <<'PY'
-from pathlib import Path
-import os
-import re
-import sys
-path = Path(sys.argv[1])
-text = path.read_text() if path.exists() else ""
-text = re.sub(r"(?m)^\s*ctrl_interface\s*=.*\n?", "", text)
-text = re.sub(r"(?m)^\s*update_config\s*=.*\n?", "", text)
-if sys.argv[2]:
-    text = re.sub(r"(?m)^\s*country\s*=.*\n?", "", text)
-    text = "country=" + sys.argv[2] + "\n" + text
-text = "ctrl_interface=DIR=/run/wpa_supplicant GROUP=ricewifi\nupdate_config=0\n" + text
-path.write_text(text.rstrip() + "\n")
-os.chmod(path, 0o600)
-PY
-
-for service in dhcpcd wpa_supplicant bluetoothd; do
-    for file in run log/run check; do
-        [[ -f "$root/sv/$service/$file" ]] || continue
-        target="/etc/sv/$service/$file"
-        save "$target"
-        install -D -m 0755 "$root/sv/$service/$file" "$target"
-    done
-done
-save /etc/sv/wpa_supplicant/conf
-sed "s/@INTERFACE@/$iface/g" "$root/sv/wpa_supplicant/conf.template" >/etc/sv/wpa_supplicant/conf
-chmod 0644 /etc/sv/wpa_supplicant/conf
-
-# Make PipeWire the ALSA default as documented by Void.
-mkdir -p /etc/alsa/conf.d
-for name in 50-pipewire.conf 99-pipewire-default.conf; do
-    save "/etc/alsa/conf.d/$name"
-    ln -sfn "/usr/share/alsa/alsa.conf.d/$name" "/etc/alsa/conf.d/$name"
-done
-
-# dbus uses Void's packaged run/check scripts. BlueZ depends on this service.
-for service in dbus wpa_supplicant dhcpcd bluetoothd; do
-    target="/var/service/$service"
-    if [[ -L $target && $(readlink -f "$target") != "/etc/sv/$service" ]]; then
-        save "$target"
-        sv down "$target" || :
-        rm "$target"
-    fi
-    if [[ ! -e $target && ! -L $target ]]; then
-        ln -s "/etc/sv/$service" "$target"
-    fi
-    [[ $(readlink -f "$target") == "/etc/sv/$service" ]] || {
-        echo "Unexpected service directory: $target" >&2; exit 1;
-    }
-    if [[ -e /etc/sv/$service/down ]]; then
-        save "/etc/sv/$service/down"
-        rm "/etc/sv/$service/down"
-    fi
-done
 wait_up() {
     local attempt
     for ((attempt=0; attempt<15; attempt++)); do
@@ -85,15 +17,155 @@ wait_up() {
         sleep 1
     done
     sv status "$1" >&2 || :
-    echo "Service failed to start: $1; see /var/log/rice/" >&2
+    echo "Service failed to start: $1" >&2
     return 1
 }
-wait_up /var/service/dbus
-# runsv discovers log/ on startup. Recycle the supervisor after adding log/
-# to an existing service; runsvdir re-creates it. All downloads are complete.
-for service in wpa_supplicant dhcpcd bluetoothd; do
-    sv -w 15 exit "/var/service/$service" >/dev/null 2>&1 || :
-    wait_up "/var/service/$service"
-    wait_up "/var/service/$service/log"
-done
-printf 'System backups: %s\n' "$backup"
+
+check_service() {
+    local link="$SERVICE_DIR/$1" unit="$SV_DIR/$1"
+    [[ -x $unit/run ]] || { echo "Missing packaged service: $unit/run" >&2; return 1; }
+    if [[ -e $link || -L $link ]]; then
+        [[ -L $link && $(readlink -f "$link") == "$(readlink -f "$unit")" ]] || {
+            echo "Unexpected service location: $link" >&2; return 1;
+        }
+    fi
+}
+
+enable_service() {
+    local link="$SERVICE_DIR/$1" unit="$SV_DIR/$1"
+    check_service "$1"
+    if [[ ! -L $link ]]; then ln -s "$unit" "$link"; fi
+    if [[ -e $unit/down ]]; then save "$unit/down"; rm "$unit/down"; fi
+    # 'up' is idempotent: do not restart an already running manager/adapter.
+    wait_up "$link"
+}
+
+disable_legacy_services() {
+    local link unit
+    for link in "$SERVICE_DIR"/dhcpcd "$SERVICE_DIR"/dhcpcd-* \
+                "$SERVICE_DIR"/wpa_supplicant "$SERVICE_DIR"/wpa_supplicant-*; do
+        [[ -e $link || -L $link ]] || continue
+        [[ -L $link ]] || { echo "Expected a service symlink: $link" >&2; return 1; }
+        save "$link"
+        unit=$(readlink -f "$link" || :)
+        OLD_NETWORK_LINKS+=("$link")
+        OLD_NETWORK_UNITS+=("$unit")
+        if [[ -e $unit/down ]]; then OLD_NETWORK_DOWN+=(1); else OLD_NETWORK_DOWN+=(0); fi
+        if [[ -d $unit ]]; then
+            # Prevent a late runsvdir discovery from starting it during handover.
+            [[ -e $unit/down ]] || : >"$unit/down"
+            if sv status "$link" >/dev/null 2>&1; then
+                sv -w 20 down "$link"
+            fi
+        fi
+        rm "$link"
+    done
+}
+
+restore_packaged_services() {
+    local package expected path actual
+    # Only undo exact run scripts shipped by the first void-rice beta. Existing
+    # administrator customizations are not mistaken for our migration work.
+    while read -r package expected path; do
+        [[ -n $package && $package != \#* && -f $path ]] || continue
+        actual=$(sha256sum "$path")
+        if [[ ${actual%% *} == "$expected" ]] && xbps-query -p pkgver "$package" >/dev/null 2>&1; then
+            save "$path"
+            xbps-install -yf "$package"
+        fi
+    done <"$root/sv/legacy-services.sha256"
+}
+
+activate_network_services() {
+    local name
+    OLD_NETWORK_LINKS=() OLD_NETWORK_UNITS=() OLD_NETWORK_DOWN=()
+    NETWORK_MANAGER_WAS_ENABLED=0
+    [[ ! -e $SERVICE_DIR/NetworkManager && ! -L $SERVICE_DIR/NetworkManager ]] || NETWORK_MANAGER_WAS_ENABLED=1
+    for name in dbus NetworkManager bluetoothd; do check_service "$name"; done
+    enable_service dbus
+    # Never have the standalone managers contend with NetworkManager.
+    disable_legacy_services
+    enable_service NetworkManager
+    enable_service bluetoothd
+}
+
+rollback_network() {
+    trap - ERR
+    [[ ${HANDOVER_PENDING:-0} == 1 && ${#OLD_NETWORK_LINKS[@]} -gt 0 ]] || return 0
+    # A fresh handover owns the new NM service. Do not stop a manager that was
+    # already enabled by the administrator before this installer ran.
+    if [[ $NETWORK_MANAGER_WAS_ENABLED == 1 ]]; then
+        echo 'Handover failed; the pre-existing NetworkManager service was retained.' >&2
+        return 0
+    fi
+    echo 'Handover failed; restoring the previous networking services.' >&2
+    if [[ -L $SERVICE_DIR/NetworkManager ]]; then
+        if sv status "$SERVICE_DIR/NetworkManager" >/dev/null 2>&1; then
+            sv -w 20 down "$SERVICE_DIR/NetworkManager" || {
+                echo 'Could not stop NetworkManager for rollback; inspect sv status.' >&2; return 0;
+            }
+        fi
+        rm "$SERVICE_DIR/NetworkManager"
+    fi
+    local i link unit
+    for i in "${!OLD_NETWORK_LINKS[@]}"; do
+        link=${OLD_NETWORK_LINKS[$i]} unit=${OLD_NETWORK_UNITS[$i]}
+        [[ -d $unit ]] || continue
+        if [[ ! -e $link && ! -L $link ]]; then ln -s "$unit" "$link"; fi
+        if [[ ${OLD_NETWORK_DOWN[$i]} == 0 ]]; then
+            rm -f "$unit/down"
+            wait_up "$link" || echo "Check the restored service: $link" >&2
+        fi
+    done
+    HANDOVER_PENDING=0
+}
+
+main() {
+    [[ $EUID == 0 && $# == 3 ]] || { echo 'Run install.sh as your desktop user.' >&2; return 2; }
+    root=$1 user=$2 stamp=$3
+    SV_DIR=/etc/sv SERVICE_DIR=/var/service
+    backup="/var/backups/rice/$stamp"
+    umask 077
+    install -d -m 0700 "$backup"
+    export LC_ALL=C
+    getent group network >/dev/null || groupadd -r network
+    for group in audio video input render bluetooth network; do
+        if getent group "$group" >/dev/null; then usermod -aG "$group" "$user"; fi
+    done
+    udevadm control --reload-rules
+    udevadm trigger --subsystem-match=backlight --action=add
+
+    # Reinstall our old package-owned wrappers while the old connection is
+    # still available. Fresh installs and later reruns skip this step.
+    restore_packaged_services
+    save /etc/NetworkManager/system-connections
+    python3 "$root/scripts/rice-network-migrate"
+
+    install -d -m 0755 /etc/alsa/conf.d
+    for name in 50-pipewire.conf 99-pipewire-default.conf; do
+        save "/etc/alsa/conf.d/$name"
+        ln -sfnT "/usr/share/alsa/alsa.conf.d/$name" "/etc/alsa/conf.d/$name"
+    done
+
+    HANDOVER_PENDING=1
+    trap rollback_network ERR
+    activate_network_services
+    # Pick up newly installed D-Bus policies without restarting the system bus.
+    dbus-send --system --type=method_call --print-reply --dest=org.freedesktop.DBus \
+        /org/freedesktop/DBus org.freedesktop.DBus.ReloadConfig >/dev/null
+    local attempt ready=0
+    for ((attempt=0; attempt<15; attempt++)); do
+        if [[ $(timeout 3 nmcli --wait 2 -t -f RUNNING general 2>/dev/null || :) == running ]]; then
+            ready=1; break
+        fi
+        sleep 1
+    done
+    [[ $ready == 1 ]] || { echo 'NetworkManager did not become ready.' >&2; return 1; }
+    nmcli --wait 5 connection reload
+    HANDOVER_PENDING=0
+    trap - ERR
+    nmcli device status
+    printf 'System backups: %s\n' "$backup"
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi

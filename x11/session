@@ -4,11 +4,11 @@ set -eu
 mkdir -p "$RICE_RUNTIME" "$RICE_CACHE/log"
 exec 8>"$RICE_RUNTIME/session.lock"
 flock -n 8 || { echo 'A rice session already owns this display.' >&2; exit 1; }
-pipewire_pid='' dunst_pid='' status_pid='' dwm_pid=''
+pipewire_pid='' dunst_pid='' status_pid='' dwm_pid='' blueman_pid=''
 cleanup() {
     trap - EXIT HUP INT TERM
     rice-picom off || :
-    for pid in "$dwm_pid" "$status_pid" "$dunst_pid"; do
+    for pid in "$dwm_pid" "$status_pid" "$dunst_pid" "$blueman_pid"; do
         [ -z "$pid" ] || kill "$pid" 2>/dev/null || :
     done
     if [ -n "$pipewire_pid" ]; then
@@ -36,6 +36,12 @@ if ! pgrep -u "$(id -u)" -x pipewire >/dev/null; then
 fi
 dunst -config "${XDG_CONFIG_HOME:-$HOME/.config}/dunst/dunstrc" >>"$RICE_CACHE/log/dunst.log" 2>&1 8>&- &
 dunst_pid=$!
+# Blueman supplies the pairing agent. The existing session lock and ownership
+# check keep WM restarts/repeated setup from spawning another applet.
+if ! pgrep -u "$(id -u)" -x blueman-applet >/dev/null; then
+    blueman-applet >>"$RICE_CACHE/log/blueman.log" 2>&1 8>&- &
+    blueman_pid=$!
+fi
 rice-picom low 8>&- || echo 'Compositor unavailable; see the picom log.' >&2
 "$HOME/.local/bin/rice-slstatus" >>"$RICE_CACHE/log/status.log" 2>&1 8>&- &
 status_pid=$!

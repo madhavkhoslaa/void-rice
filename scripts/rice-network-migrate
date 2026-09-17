@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""Import simple legacy wpa_supplicant profiles once, without replacing NM profiles."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+import uuid
+
+
+def uncomment(line):
+    quoted = escaped = False
+    for i, char in enumerate(line):
+        if char == '"' and not escaped:
+            quoted = not quoted
+        if char == "#" and not quoted:
+            return line[:i].strip()
+        escaped = char == "\\" and not escaped
+    return line.strip()
+
+
+def network_blocks(text):
+    current = None
+    for raw in text.splitlines():
+        line = uncomment(raw)
+        if re.fullmatch(r"network\s*=\s*\{", line):
+            current = {}
+        elif line == "}" and current is not None:
+            yield current
+            current = None
+        elif current is not None and line:
+            if "=" not in line:
+                current["unsupported-syntax"] = line
+            else:
+                key, value = line.split("=", 1)
+                current[key.strip()] = value.strip()
+
+
+def ssid_bytes(value):
+    if value.startswith('"') and value.endswith('"'):
+        result = value[1:-1].encode("utf-8")
+    elif re.fullmatch(r"(?:[0-9a-fA-F]{2}){1,32}", value):
+        result = bytes.fromhex(value)
+    else:
+        raise ValueError("unsupported SSID encoding")
+    if not 1 <= len(result) <= 32:
+        raise ValueError("SSID must be 1-32 bytes")
+    return result
+
+
+def keyfile_string(value):
+    # GLib keyfile escapes, including whitespace at the ends of a passphrase.
+    return (value.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+            .replace("\t", "\\t").replace(" ", "\\s"))
+
+
+def known_ssids(folder):
+    result = set()
+    for path in folder.glob("*"):
+        if not path.is_file():
+            continue
+        try:
+            section = ""
+            for line in path.read_text().splitlines():
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    section = stripped[1:-1]
+                    continue
+                match = re.match(r"^\s*ssid\s*=(.*)$", line)
+                if section not in {"wifi", "802-11-wireless"} or not match:
+                    continue
+                # Unlike ConfigParser, GLib preserves trailing value spaces.
+                value = match[1].lstrip(" \t")
+                if re.fullmatch(r"(?:\d{1,3};)+", value):
+                    result.add(bytes(int(n) for n in value.rstrip(";").split(";")))
+                else:
+                    escapes = {"s": " ", "n": "\n", "r": "\r", "t": "\t", "\\": "\\", ";": ";"}
+                    value = re.sub(r"\\([snrt\\;])", lambda m: escapes[m[1]], value)
+                    # NM adds its own semicolon escaping on top of GLib's
+                    # backslash escaping to distinguish strings from byte lists.
+                    value = value.replace(r"\;", ";")
+                    result.add(value.encode("utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            # Unknown/custom files are retained byte-for-byte.
+            continue
+    return result
+
+
+def profile(block):
+    allowed = {"ssid", "psk", "key_mgmt", "scan_ssid", "priority", "disabled", "id_str",
+               "proto", "pairwise", "group", "ieee80211w"}
+    if set(block) - allowed:
+        raise ValueError("custom or enterprise settings require nmtui")
+    ssid = ssid_bytes(block.get("ssid", ""))
+    security = block.get("key_mgmt", "WPA-PSK" if "psk" in block else "NONE")
+    if security not in {"WPA-PSK", "NONE"}:
+        raise ValueError("custom security requires nmtui")
+    if security == "NONE" and "psk" in block:
+        raise ValueError("unexpected PSK on an open network")
+    priority = int(block.get("priority", "0"))
+    if not -999 <= priority <= 999:
+        raise ValueError("unsupported priority")
+    hidden = block.get("scan_ssid", "0")
+    disabled = block.get("disabled", "0")
+    if hidden not in {"0", "1"} or disabled not in {"0", "1"}:
+        raise ValueError("unsupported network flags")
+    digest = hashlib.sha256(ssid).hexdigest()[:20]
+    lines = ["[connection]", f"id=rice-wifi-{digest}",
+             f"uuid={uuid.uuid5(uuid.NAMESPACE_URL, 'void-rice:wifi:' + ssid.hex())}",
+             "type=wifi", f"autoconnect={'true' if disabled == '0' else 'false'}",
+             f"autoconnect-priority={priority}", "", "[wifi]", "mode=infrastructure",
+             # Numeric byte arrays avoid ambiguity with delimiters or binary SSIDs.
+             "ssid=" + "".join(f"{byte};" for byte in ssid),
+             f"hidden={'true' if hidden == '1' else 'false'}"]
+    if security == "WPA-PSK":
+        psk = block.get("psk", "")
+        if psk.startswith('"') and psk.endswith('"') and 8 <= len(psk[1:-1]) <= 63:
+            psk = psk[1:-1]
+        elif not re.fullmatch(r"[0-9a-fA-F]{64}", psk):
+            raise ValueError("unsupported or missing PSK")
+        lines += ["", "[wifi-security]", "key-mgmt=wpa-psk", "psk=" + keyfile_string(psk)]
+        for field, choices in {"proto": {"WPA", "RSN"}, "pairwise": {"CCMP", "TKIP"},
+                               "group": {"CCMP", "TKIP", "WEP40", "WEP104"}}.items():
+            if field in block:
+                values = block[field].split()
+                if not values or set(values) - choices:
+                    raise ValueError("unsupported cipher/protocol")
+                lines.append(field + "=" + ";".join(value.lower() for value in values) + ";")
+        if "ieee80211w" in block:
+            pmf = {"0": 1, "1": 2, "2": 3}.get(block["ieee80211w"])
+            if pmf is None:
+                raise ValueError("unsupported PMF mode")
+            lines.append(f"pmf={pmf}")
+    elif any(field in block for field in ("proto", "pairwise", "group", "ieee80211w")):
+        raise ValueError("unexpected security settings on an open network")
+    lines += ["", "[ipv4]", "method=auto", "", "[ipv6]", "method=auto", ""]
+    return ssid, f"rice-wifi-{digest}.nmconnection", "\n".join(lines)
+
+
+def migrate(supplicant_dir, connections, state_dir):
+    marker = state_dir / "networkmanager-migration.json"
+    if marker.exists():
+        return {"already_migrated": True, "imported": 0, "kept": 0, "skipped": 0}
+    connections.mkdir(parents=True, exist_ok=True, mode=0o700)
+    existing = known_ssids(connections)
+    counts = {"already_migrated": False, "imported": 0, "kept": 0, "skipped": 0}
+    for path in sorted(supplicant_dir.glob("*.conf")):
+        for block in network_blocks(path.read_text()):
+            try:
+                ssid, name, content = profile(block)
+            except (ValueError, UnicodeError):
+                counts["skipped"] += 1
+                continue
+            if ssid in existing:
+                counts["kept"] += 1
+                continue
+            try:
+                fd = os.open(connections / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                counts["kept"] += 1
+                continue
+            with os.fdopen(fd, "w") as output:
+                output.write(content)
+            existing.add(ssid)
+            counts["imported"] += 1
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp = tempfile.mkstemp(dir=state_dir, prefix=".network-migration-")
+    try:
+        with os.fdopen(fd, "w") as output:
+            json.dump(counts, output)
+            output.write("\n")
+        os.replace(temp, marker)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+    return counts
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.parse_args()
+    if os.geteuid() != 0:
+        parser.exit(1, "Run through install.sh's root setup phase.\n")
+    counts = migrate(Path("/etc/wpa_supplicant"), Path("/etc/NetworkManager/system-connections"),
+                     Path("/var/lib/void-rice"))
+    if counts["already_migrated"]:
+        print("Legacy Wi-Fi migration already complete; keeping NetworkManager profiles.")
+        return
+    print("Wi-Fi migration: {imported} imported, {kept} existing profiles kept, "
+          "{skipped} custom blocks left in the original configuration.".format(**counts))
+    if counts["skipped"]:
+        print("Use nmtui to configure the remaining custom/WPA3/enterprise networks.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,7 +1,0 @@
-#!/bin/sh
-. /etc/sv/wpa_supplicant/conf
-if [ "$WPA_INTERFACE" = none ]; then
-    /usr/bin/wpa_cli -g /run/wpa_supplicant/global ping 2>/dev/null | grep -q '^PONG$'
-    exit $?
-fi
-/usr/bin/wpa_cli -p /run/wpa_supplicant -i "$WPA_INTERFACE" ping 2>/dev/null | grep -q '^PONG$'

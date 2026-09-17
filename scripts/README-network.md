@@ -1,137 +1,130 @@
-# Networking, Bluetooth, brightness and audio
+# NetworkManager, Bluetooth, brightness and audio
 
-## Ownership and runit services
+## Networking: one manager for Ethernet and Wi-Fi
 
-`wpa_supplicant` owns wireless association; **dhcpcd owns IP configuration on
-both wired and wireless interfaces**. The installer writes the complete service
-scripts supplied in `sv/`, then enables these links:
+The rice uses **NetworkManager** with Void's packaged runit service. Its package
+includes `nmcli`, `nmtui`, `nmtui-connect` and `nm-online`; it also pulls in
+`wpa_supplicant` as its Wi-Fi backend. The standalone supplicant/dhcpcd services
+are disabled so they cannot compete with NetworkManager.
 
-```sh
-sudo ln -s /etc/sv/dbus /var/service/dbus
-sudo ln -s /etc/sv/wpa_supplicant /var/service/wpa_supplicant
-sudo ln -s /etc/sv/dhcpcd /var/service/dhcpcd
-sudo ln -s /etc/sv/bluetoothd /var/service/bluetoothd
+The installer enables these packaged services:
+
+```text
+/var/service/dbus           -> /etc/sv/dbus
+/var/service/NetworkManager -> /etc/sv/NetworkManager
+/var/service/bluetoothd     -> /etc/sv/bluetoothd
 ```
 
-These are the equivalent first-install commands; `install.sh` handles existing
-links, backup files, foreground processes, logging, startup ordering and new
-supervisors. It accepts `sudo`, `doas`, or `su` for its privileged phase.
+It adds your user to `network` and `bluetooth`. Void's packages supply the
+corresponding access rules. **Log out completely and log back in** to get the
+new group membership. The installer reloads D-Bus configuration without
+restarting the system bus. No custom network service run scripts are installed.
 
-The effective commands in the run scripts are:
+### Everyday connection management
 
-```sh
-/usr/bin/dhcpcd -B -M -C wpa_supplicant
-/usr/bin/wpa_supplicant -D nl80211 -i "$WPA_INTERFACE" -c /etc/wpa_supplicant/wpa_supplicant.conf
-/usr/libexec/bluetooth/bluetoothd -n
-```
+- **Super+Shift+n** opens `nmtui` in a terminal.
+- `nmtui` lets you activate, edit and save Ethernet/Wi-Fi connections.
+- `rice-wifi-add` remains available as a compatibility command for
+  `nmtui-connect`.
 
-`-B` keeps dhcpcd in the foreground; `-M` selects its manager mode. Its
-`wpa_supplicant` hook is disabled with `-C`: this prevents a second supplicant
-competing with runit. The supplicant itself has **no `-B` flag**.
-
-The detected Wi-Fi name is saved in both:
-
-- `/etc/sv/wpa_supplicant/conf` — `WPA_INTERFACE` and `CONF_FILE`.
-- `~/.config/rice/wifi-interface` — the bar's interface name.
-
-On an Ethernet-only VM, `WPA_INTERFACE=none`. The service runs
-`wpa_supplicant -g /run/wpa_supplicant/global` without attaching a nonexistent
-adapter, and the Wi-Fi icon is followed by `absent`. To add a passed-through adapter,
-rerun the installer with `RICE_WIFI_INTERFACE=your-interface`.
-
-## Wi-Fi credentials and permissions
-
-Existing `/etc/wpa_supplicant/wpa_supplicant.conf` network blocks are preserved,
-including WPA3 and enterprise configurations. The installer sets:
-
-```ini
-ctrl_interface=DIR=/run/wpa_supplicant GROUP=ricewifi
-update_config=0
-```
-
-The file remains root-owned, mode `0600`. The control directory is root:ricewifi,
-mode `0770`. Your user joins `ricewifi`, so **log out completely and log back in**
-before testing the bar. This group grants supplicant control, including network
-changes, not just read-only status. There is no privileged command in a bar poll.
-
-To add a WPA2-Personal network interactively:
+The command-line equivalents are:
 
 ```sh
-rice-wifi-add
+nmcli device status
+nmcli connection show
+nmcli radio wifi on
+nmcli device wifi list
+nmcli --ask device wifi connect 'Your SSID'
+# Activate an already saved profile, by its name or UUID:
+nmcli connection up uuid YOUR-CONNECTION-UUID
 ```
 
-This uses `wpa_passphrase` with the passphrase on stdin, removes its plaintext
-`#psk` comment, backs up the existing config, appends the PSK block, and issues
-`wpa_cli reconfigure`. An existing configuration avoids the install-time prompt.
-For WPA3-only or enterprise networks, use the network block appropriate to that
-network in the same file; the installer preserves it.
+`--ask` requests the password interactively instead of putting it in a process
+argument. Saved profiles normally live in
+`/etc/NetworkManager/system-connections/`. Ethernet uses NetworkManager's
+automatic configuration on a fresh install. Existing NetworkManager profiles,
+including static IP/DNS choices, are preserved.
 
-Set your regulatory domain during installation if needed:
+### Upgrading from the first beta and rerunning the installer
+
+Run the same `./install.sh` after updating your checkout. It:
+
+1. Finishes installing packages/building the rice before handing over networking.
+2. Recognizes the **exact** old beta service wrappers by hash and reinstalls their
+   owning packages to restore the packaged run scripts.
+3. Imports compatible saved WPA2-Personal/open networks into root-only (`0600`)
+   NetworkManager keyfiles. Existing NM profiles for the same SSID take priority.
+4. Stops and unlinks standalone `dhcpcd`/`wpa_supplicant` services, including
+   per-interface variants, before enabling NetworkManager.
+5. Reloads connection files and checks that the NetworkManager D-Bus API is ready.
+
+If a new NetworkManager handover fails, the installer attempts to stop that new
+service and restore the previous network-service links before exiting. It does
+not force-stop a NetworkManager service that was already enabled before the run.
+
+The original `/etc/wpa_supplicant/*.conf` files are retained. Custom/WPA3/EAP
+blocks are reported and left intact rather than approximated; configure those
+through NetworkManager. The former `RICE_WIFI_INTERFACE`/`RICE_COUNTRY` installer
+settings are no longer used—NetworkManager discovers the interfaces itself.
+
+A migration marker in `/var/lib/void-rice/networkmanager-migration.json` prevents
+later runs from importing the same legacy settings again or resurrecting profiles
+you intentionally deleted. Existing NM passwords and BlueZ pairings are retained.
+Rerunning uses **`sv up`, not `sv restart`**, for NetworkManager and Bluetooth.
+
+On a new setup with no active connection, an interactive installation opens
+`nmtui-connect`. On an Ethernet-only VM, no wireless interface or credentials are
+required. The initial handover from the legacy services can reconnect the link.
+
+### Exact bar queries
+
+The network field uses `rice-wifi-status` (the filename is kept for compatibility):
 
 ```sh
-RICE_COUNTRY=GB ./install.sh
+nmcli --wait 2 -t --escape yes -f DEVICE,TYPE,STATE device status
+nmcli --wait 2 -t --escape yes -f IN-USE,SSID,SIGNAL device wifi list ifname wlan0 --rescan no
+nmcli --wait 2 -g WIFI general
 ```
 
-Use your actual two-letter country code. An unset variable preserves an existing
-`country=` line and otherwise uses the kernel/regulatory defaults.
+The interface name is discovered from the first command; `wlan0` above is just
+an example. **`--rescan no`** reads the cached AP information without requesting
+a scan. Signal is NetworkManager's **0–100% strength**, not dBm.
 
-## Exact Wi-Fi bar queries
+The field shows an active Wi-Fi SSID/strength, or falls back to an Ethernet icon
+and connected interface. If both are connected, Wi-Fi is displayed. Other states
+include off, connecting, disconnected, unmanaged, absent and NM unavailable.
+It reports link state, not a guarantee of Internet/captive-portal reachability.
 
-Inside the installed X session:
+Results are cached for 10 seconds, including when audio/brightness keys refresh
+slstatus. Each `nmcli` invocation has a 3-second outer timeout. Terse-output
+escaping is parsed explicitly; SSID labels are capped at 20 characters and bar
+separators/control characters are sanitized.
 
-```sh
-iface=$(cat "${XDG_CONFIG_HOME:-$HOME/.config}/rice/wifi-interface")
-wpa_cli -p /run/wpa_supplicant -i "$iface" status
-wpa_cli -p /run/wpa_supplicant -i "$iface" signal_poll
-ip -o addr show dev "$iface" scope global
-```
-
-`rice-wifi-status` parses `wpa_state=COMPLETED` and `ssid=` from `status`, and
-**`RSSI=` from `signal_poll`**. RSSI is shown in dBm, not a made-up percentage.
-An unsupported signal poll shows `?dBm`. The script does not trigger scans.
-It caches the result for 10 seconds and bounds each control request at 2 seconds.
-SSID escape sequences remain literal, with a 20-byte display limit; control
-characters and `|`/`;` separators cannot corrupt the other fields or the clock.
-
-`ip` checks the live address state after association. No global address means
-`IP?`; it can also indicate a static/SLAAC configuration issue.
-The bar distinguishes link/IP availability, not external Internet reachability.
-
-Useful DHCP commands (administration, **not periodic bar polling**):
+Diagnostics:
 
 ```sh
-sudo sv status /var/service/dhcpcd /var/service/wpa_supplicant
-sudo dhcpcd -n "$iface"       # ask the running daemon to rebind/reconfigure
-sudo dhcpcd -U "$iface"       # dump the saved DHCP lease, if one exists
-sudo tail -n 40 /var/log/rice/dhcpcd/current
-sudo tail -n 40 /var/log/rice/wpa_supplicant/current
-```
-
-A lease dump can be stale, so the bar does not equate its existence with being
-connected. Wireless state/control sockets are in `/run/wpa_supplicant/`.
-
-Manual association diagnostics:
-
-```sh
-wpa_cli -p /run/wpa_supplicant -i "$iface" ping
-wpa_cli -p /run/wpa_supplicant -i "$iface" list_networks
-wpa_cli -p /run/wpa_supplicant -i "$iface" scan
-wpa_cli -p /run/wpa_supplicant -i "$iface" scan_results
-sudo rfkill list
+sudo sv status /var/service/dbus /var/service/NetworkManager
+nmcli general status
+nmcli device status
+nmcli general permissions
+sudo NetworkManager --print-config
+rfkill list
 sudo rfkill unblock wifi
 ```
 
-`rfkill` is supplied by Void's `util-linux` package. Hardware airplane switches
-still need to be switched on physically.
+## Bluetooth: BlueZ service + Blueman interface
 
-## Bluetooth: BlueZ, D-Bus, runit
+**BlueZ (`bluez`) supplies the `bluetoothd` service and `bluetoothctl`.** Void's
+packaged service starts `/usr/libexec/bluetooth/bluetoothd` after D-Bus is ready.
+**Blueman (`blueman`) supplies graphical pairing and device management.**
 
-Void's **package is `bluez`, service is `bluetoothd`**, and the daemon is
-`/usr/libexec/bluetooth/bluetoothd`. The run script waits for Void's packaged
-`dbus` service. Your user joins the `bluetooth` group.
+- **Super+Shift+b** opens `blueman-manager`; it also appears in rofi.
+- `blueman-applet` runs once in the X session to provide the pairing agent.
+  It is outside dwm's restart lifecycle. The six-field bar remains unchanged;
+  applet tray icons appear only if you enable the existing systray option.
+- Existing pairings in `/var/lib/bluetooth/` and radio power preferences are kept.
 
-After the new login, pair through one interactive `bluetoothctl` session, so the
-agent stays alive during pairing:
+CLI pairing also works. Use one interactive session so the agent remains active:
 
 ```text
 bluetoothctl
@@ -146,60 +139,51 @@ scan off
 quit
 ```
 
-Substitute the device address printed by `scan on`. For a blocked adapter, run
-`sudo rfkill unblock bluetooth`. Power is controllable with
-`bluetoothctl power off` / `bluetoothctl power on`.
+Use your device's address. For a soft-blocked radio, run
+`sudo rfkill unblock bluetooth`; a hardware block requires the laptop switch or
+firmware setting. A VM needs an actual/passed-through adapter for pairing.
 
-The bar polls these exact commands every 30 seconds, with a 3-second timeout:
+The Bluetooth bar field polls these commands every 30 seconds (3-second timeout):
 
 ```sh
 bluetoothctl show
 bluetoothctl devices Connected
 ```
 
-It reads `Powered: yes/no` and counts `Device ...` lines from the second command.
-Following the Bluetooth icon, the results are `n/a`, `off`, `on`, or a connected
-device count. Polling
-never enables discovery. This targets the default controller; use
-`bluetoothctl select CONTROLLER-MAC` when managing multiple controllers manually.
+Following the Bluetooth icon it shows `n/a`, `off`, `on`, or the number of
+connected devices. Status polling never enables discovery.
 
 ```sh
-sudo sv status /var/service/dbus /var/service/bluetoothd
-sudo tail -n 40 /var/log/rice/bluetoothd/current
+sudo sv status /var/service/bluetoothd
+bluetoothctl show
 ```
 
 ## Brightness and PipeWire audio
 
 - Brightness reads `/sys/class/backlight/intel_backlight/{brightness,max_brightness}`,
-  falling back to the first available backlight. It reports requested brightness
-  as a percentage of `max_brightness`. An ordinary VM has no physical backlight,
-  so `n/a` following the sun icon is expected there.
-- Brightness keys use `brightnessctl -d DEVICE -n 1 set +5%` and
-  `brightnessctl -d DEVICE -n 1 set 5%-`. The installer reloads its udev rules and
-  triggers the backlight subsystem; your user joins `video`.
-- Audio reads `wpctl get-volume @DEFAULT_AUDIO_SINK@`, including `[MUTED]`.
-  The bar shows, for example, an audio icon followed by `45% muted`. An absent
-  sink is reported as `n/a`.
-- Audio keys run `wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+`,
+  falling back to the first backlight. A VM without a backlight shows `n/a`.
+- Brightness keys use `brightnessctl -d DEVICE -n 1 set +5%` / `5%-`.
+  The installer reloads the udev rules and adds your user to `video`.
+- Audio uses `wpctl get-volume @DEFAULT_AUDIO_SINK@`, including `[MUTED]`.
+- Audio keys use `wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+`,
   `wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-`, and
   `wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle`.
-- `rice-controls` signals the session's **slstatus with SIGUSR1**, using its own
-  validated PID file, to refresh after a key press. External changes appear at
-  the next 10-second poll. There is no extra high-frequency polling process.
+- Controls signal slstatus with SIGUSR1 for immediate refresh; external changes
+  appear on its 10-second tick.
 
-PipeWire uses Void's standard `10-wireplumber.conf` and
-`20-pipewire-pulse.conf` user drop-ins. Thus the `pipewire &` autostart line in
-`x11/session` also starts WirePlumber and the PulseAudio-compatible server.
-`alsa-pipewire` handles ALSA clients; `libspa-bluetooth` handles Bluetooth audio.
-WirePlumber's seat-monitoring override supports this setup without a login
-manager; device access is via the `audio` and `video` groups.
+PipeWire's standard Void `10-wireplumber.conf` and `20-pipewire-pulse.conf`
+drop-ins start WirePlumber and the PulseAudio-compatible server from the session's
+single `pipewire` process. `alsa-pipewire` handles ALSA clients and
+`libspa-bluetooth` handles Bluetooth audio. Device access uses `audio`/`video`
+groups; the WirePlumber override supports operation without a login manager.
 
 ```sh
 wpctl status
 pactl info
-# Select an output, using its numeric ID from wpctl status:
+# Select an output ID shown by wpctl status:
 wpctl set-default 42
 ```
 
-Audio is per-user and uses the session D-Bus/runtime directory, not a system
-runit audio daemon.
+Session logs (including `blueman.log`) are in `~/.cache/rice/log/`. Old beta
+network-service logs remain under `/var/log/rice/` on upgraded installations;
+fresh installs use the packaged services' normal logging behavior.

@@ -1,3 +1,0 @@
-#!/bin/sh
-mkdir -p /var/log/rice/bluetoothd
-exec svlogd -tt /var/log/rice/bluetoothd
